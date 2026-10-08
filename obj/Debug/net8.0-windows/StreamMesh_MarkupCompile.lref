@@ -1,0 +1,11 @@
+﻿
+F/app/applet/App.xaml;;
+F/app/applet/UI/Views/HomeView.xaml;;
+F/app/applet/UI/Views/PlayerView.xaml;;
+F/app/applet/UI/Views/SettingsView.xaml;;
+F/app/applet/UI/Windows/EditChannelWindow.xaml;;
+F/app/applet/UI/Windows/MainWindow.xaml;;
+F/app/applet/UI/Windows/MediaDetailsWindow.xaml;;
+F/app/applet/UI/Windows/MergeChannelsWindow.xaml;;
+F/app/applet/UI/Windows/SeriesDetailsWindow.xaml;;
+

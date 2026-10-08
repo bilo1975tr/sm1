@@ -1,0 +1,275 @@
+using System;
+using System.Collections.Generic;
+using System.Net.Http;
+using System.Threading.Tasks;
+using Newtonsoft.Json;
+using StreamMesh.Models;
+using StreamMesh.Core.Database;
+using StreamMesh.Core.Utils;
+
+namespace StreamMesh.Core.Media
+{
+    public class AutoUpdateConfig
+    {
+        [JsonProperty("tv")]
+        public List<string> Tv { get; set; } = new List<string>();
+
+        [JsonProperty("film")]
+        public List<string> Film { get; set; } = new List<string>();
+
+        [JsonProperty("dizi")]
+        public List<string> Dizi { get; set; } = new List<string>();
+
+        [JsonProperty("radyo")]
+        public List<string> Radyo { get; set; } = new List<string>();
+
+        [JsonProperty("karma")]
+        public List<string> Karma { get; set; } = new List<string>();
+
+        [JsonProperty("epg")]
+        public List<string> Epg { get; set; } = new List<string>();
+    }
+
+    public class GitHubSyncEngine
+    {
+        private static readonly HttpClient _httpClient;
+        private static int _isRunning = 0;
+        private readonly DatabaseEngine _db = new DatabaseEngine();
+        private readonly M3uEngine _m3u = new M3uEngine();
+
+        static GitHubSyncEngine()
+        {
+            var handler = new HttpClientHandler
+            {
+                AutomaticDecompression = System.Net.DecompressionMethods.GZip | System.Net.DecompressionMethods.Deflate,
+                AllowAutoRedirect = true
+            };
+            _httpClient = new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(12) };
+            _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36 StreamMesh/1.0");
+        }
+
+        public event Action<int, string>? OnProgress;
+        public static event Action<int, string>? OnStaticProgress;
+        public static event Action? OnSyncStarted;
+        public static event Action? OnSyncCompleted;
+        public static void RaiseSyncStarted() => OnSyncStarted?.Invoke();
+        public static void RaiseSyncCompleted() => OnSyncCompleted?.Invoke();
+
+        private void ReportProgress(int pct, string message)
+        {
+            OnProgress?.Invoke(pct, message);
+            OnStaticProgress?.Invoke(pct, message);
+        }
+
+        public async Task PullFromGitHubAsync()
+        {
+            if (System.Threading.Interlocked.CompareExchange(ref _isRunning, 1, 0) != 0)
+            {
+                LogService.LogInfo("GitHubSyncEngine: Senkronizasyon zaten çalışıyor, atlandı.");
+                return;
+            }
+
+            RaiseSyncStarted();
+            DatabaseEngine.SuppressEvents = true;
+            LogService.LogInfo("GitHubSyncEngine: Otomatik güncelleme başlatıldı.");
+            ReportProgress(2, "Temizlenmiş yayın listesi kontrol ediliyor (full_cleaned_playlist.m3u)...");
+            try
+            {
+                // 1. Önce GitHub Actions tarafından oluşturulan derin doğrulanmış tam temizlenmiş master M3U listesini dene
+                string cleanM3uUrl = "https://raw.githubusercontent.com/bilo1975tr/sm/refs/heads/main/out/full_cleaned_playlist.m3u";
+                bool cleanM3uLoaded = false;
+
+                try
+                {
+                    using var cleanCts = new System.Threading.CancellationTokenSource(TimeSpan.FromMinutes(5));
+                    var response = await _httpClient.GetAsync(cleanM3uUrl, cleanCts.Token);
+                    if (response.IsSuccessStatusCode)
+                    {
+                        ReportProgress(15, "Temizlenmiş master liste indiriliyor...");
+                        _db.AddM3uSource(cleanM3uUrl);
+                        var channels = await _m3u.ParseM3uAsync(cleanM3uUrl, "TV", false, (subMsg, subPct) =>
+                        {
+                            ReportProgress(20 + (int)(subPct * 0.6), $"Temizlenmiş liste işleniyor: {subMsg}");
+                        });
+
+                        if (channels != null && channels.Count > 0)
+                        {
+                            await _db.SyncIncomingChannelsAsync(channels);
+                            cleanM3uLoaded = true;
+                            ReportProgress(80, $"🎉 {channels.Count} adet doğrulanmış ve temizlenmiş kanal eklendi!");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    LogService.LogWarning($"Clean M3U yüklenemedi, yedek moda geçiliyor: {ex.Message}");
+                }
+
+                // 2. Eğer clean M3U bulunamadıysa varsayılan auto_update.json kaynaklarını indir
+                string configJson = "";
+                string configUrl = "https://raw.githubusercontent.com/bilo1975tr/sm/refs/heads/main/auto_update.json";
+                
+                try
+                {
+                    using var configCts = new System.Threading.CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    var configResponse = await _httpClient.GetAsync(configUrl, configCts.Token);
+                    if (configResponse.IsSuccessStatusCode)
+                    {
+                        configJson = await configResponse.Content.ReadAsStringAsync(configCts.Token);
+                    }
+                }
+                catch { }
+
+                if (string.IsNullOrEmpty(configJson))
+                {
+                    string localPath = System.IO.Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "auto_update.json");
+                    if (!System.IO.File.Exists(localPath)) localPath = "auto_update.json";
+                    if (System.IO.File.Exists(localPath))
+                    {
+                        configJson = await System.IO.File.ReadAllTextAsync(localPath);
+                    }
+                }
+
+                if (!string.IsNullOrEmpty(configJson))
+                {
+                    var cfg = JsonConvert.DeserializeObject<AutoUpdateConfig>(configJson);
+                    if (cfg != null)
+                    {
+                        // Eğer clean M3U yüklenemediyse ham listeleri tara
+                        if (!cleanM3uLoaded)
+                        {
+                            int totalSources = (cfg.Tv?.Count ?? 0) + (cfg.Film?.Count ?? 0) + (cfg.Dizi?.Count ?? 0) + (cfg.Radyo?.Count ?? 0) + (cfg.Karma?.Count ?? 0) + (cfg.Epg?.Count ?? 0);
+                            int processedSources = 0;
+                            var accumulativeChannels = new List<Channel>();
+
+                            if (cfg.Tv != null && cfg.Tv.Count > 0)
+                            {
+                                await ProcessListWithProgress(cfg.Tv, "TV", totalSources, () => ++processedSources, true, accumulativeChannels);
+                                if (accumulativeChannels.Count > 0)
+                                {
+                                    LogService.LogInfo($"GitHubSyncEngine: Erken TV gösterimi için {accumulativeChannels.Count} TV kanalı SQLite'a kaydediliyor...");
+                                    await _db.SyncIncomingChannelsAsync(new List<Channel>(accumulativeChannels));
+                                    DatabaseEngine.SuppressEvents = false;
+                                    DatabaseEngine.NotifyDatabaseUpdated();
+                                    DatabaseEngine.SuppressEvents = true;
+                                }
+                            }
+                            if (cfg.Film != null && cfg.Film.Count > 0) await ProcessListWithProgress(cfg.Film, "Film", totalSources, () => ++processedSources, true, accumulativeChannels);
+                            if (cfg.Dizi != null && cfg.Dizi.Count > 0) await ProcessListWithProgress(cfg.Dizi, "Dizi", totalSources, () => ++processedSources, true, accumulativeChannels);
+                            if (cfg.Radyo != null && cfg.Radyo.Count > 0) await ProcessListWithProgress(cfg.Radyo, "Radyo", totalSources, () => ++processedSources, true, accumulativeChannels);
+                            if (cfg.Karma != null && cfg.Karma.Count > 0) await ProcessListWithProgress(cfg.Karma, "Karma", totalSources, () => ++processedSources, false, accumulativeChannels);
+
+                            if (accumulativeChannels.Count > 0)
+                            {
+                                LogService.LogInfo($"GitHubSyncEngine: Toplam {accumulativeChannels.Count} kanal kaynaklardan çözümlendi. SQLite veritabanına senkronize ediliyor...");
+                                await _db.SyncIncomingChannelsAsync(accumulativeChannels);
+                            }
+                        }
+
+                        // EPG Verilerini Her Durumda Güncelle
+                        if (cfg.Epg != null && cfg.Epg.Count > 0)
+                        {
+                            ReportProgress(85, "Yayın akışları (EPG) güncelleniyor...");
+                            var epgEng = new EpgEngine();
+                            for (int i = 0; i < cfg.Epg.Count; i++)
+                            {
+                                string url = cfg.Epg[i];
+                                if (string.IsNullOrWhiteSpace(url)) continue;
+
+                                _db.AddEpgSource(url);
+                                await epgEng.LoadEpgAsync(url, (subMsg, subPct) =>
+                                {
+                                    ReportProgress(85 + (int)(subPct * 0.14), $"EPG Rehberi ({i + 1}/{cfg.Epg.Count}): {subMsg}");
+                                });
+                            }
+                        }
+                    }
+                }
+
+                // Logo senkronizasyonunu ve eksik logoların zenginleştirilmesini tetikle
+                try
+                {
+                    var logoSync = new LogoSyncService();
+                    await logoSync.SyncIfNecessaryAsync();
+                }
+                catch (Exception logoEx)
+                {
+                    LogService.LogWarning($"GitHubSyncEngine: LogoSync tetikleme uyarısı: {logoEx.Message}");
+                }
+
+                var finalCount = (await _db.GetAllChannelsAsync()).Count;
+                LogService.LogInfo($"GitHubSyncEngine: Senkronizasyon sonu SQLite veritabanında toplam {finalCount} kanal mevcut.");
+
+                DatabaseEngine.NotifyDatabaseUpdated();
+                LogService.LogInfo("GitHubSyncEngine: Güncelleme tamamlandı.");
+                ReportProgress(100, "🎉 Bulut güncelleme başarıyla tamamlandı!");
+            }
+            catch (Exception ex)
+            {
+                LogService.LogError("GitHubSyncEngine error", ex);
+                ReportProgress(0, $"Hata oluştu: {ex.Message}");
+            }
+            finally
+            {
+                System.Threading.Interlocked.Exchange(ref _isRunning, 0);
+                OnSyncCompleted?.Invoke();
+                DatabaseEngine.SuppressEvents = false;
+            }
+        }
+
+        private async Task ProcessListWithProgress(List<string> urls, string categoryLabel, int totalSources, Func<int> incrementCounter, bool forceCategory, List<Channel> collector)
+        {
+            if (urls == null || urls.Count == 0) return;
+
+            var validUrls = urls.Where(u => !string.IsNullOrWhiteSpace(u)).ToList();
+            if (validUrls.Count == 0) return;
+
+            // Çoklu indirme: Ağ bant genişliğini ve CPU'yu verimli kullanarak kaynakları paralel çek
+            int maxParallelism = Math.Min(12, Math.Max(4, Environment.ProcessorCount * 2));
+            using var semaphore = new System.Threading.SemaphoreSlim(maxParallelism, maxParallelism);
+            var lockObj = new object();
+
+            var tasks = validUrls.Select(async (url, i) =>
+            {
+                await semaphore.WaitAsync();
+                int currentIdx = incrementCounter();
+                double baseProgress = (double)(currentIdx - 1) / totalSources * 100.0;
+                double itemWeight = 100.0 / totalSources;
+
+                try
+                {
+                    lock (lockObj)
+                    {
+                        _db.AddM3uSource(url);
+                    }
+
+                    var channels = await _m3u.ParseM3uAsync(url, categoryLabel, forceCategory, (subMsg, subPct) =>
+                    {
+                        double overallPct = Math.Min(99.0, baseProgress + (subPct / 100.0) * itemWeight);
+                        ReportProgress((int)overallPct, $"[{currentIdx}/{totalSources}] {categoryLabel}: {subMsg}");
+                    });
+
+                    if (channels != null && channels.Count > 0)
+                    {
+                        lock (lockObj)
+                        {
+                            collector.AddRange(channels);
+                        }
+                        double finishedPct = Math.Min(99.0, baseProgress + itemWeight);
+                        ReportProgress((int)finishedPct, $"[{currentIdx}/{totalSources}] {categoryLabel}: {channels.Count} içerik çözümlendi.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    ReportProgress((int)baseProgress, $"[{currentIdx}/{totalSources}] {categoryLabel} Hata: {ex.Message}");
+                }
+                finally
+                {
+                    semaphore.Release();
+                }
+            });
+
+            await Task.WhenAll(tasks);
+        }
+    }
+}
