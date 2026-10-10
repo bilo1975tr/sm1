@@ -43,14 +43,16 @@ namespace StreamMesh.Core.Database
         private readonly SourceRepository _sources;
         private readonly IptvRepository _iptv;
         private readonly LogoRepository _logo;
+        private readonly IptvOrgRepository _iptvOrg;
 
         private static readonly TaskCompletionSource<bool> _initTcs = new();
         private static bool _isInitializing = false;
 
-        public DatabaseEngine()
+        public DatabaseEngine() : this(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "database_v2.db")) { }
+
+        public DatabaseEngine(string customDbPath)
         {
-            // V1.8.5: Database is now kept in the application folder for better reliability and speed.
-            _dbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "database_v2.db");
+            _dbPath = string.IsNullOrWhiteSpace(customDbPath) ? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "database_v2.db") : customDbPath;
             _settings = new SettingsRepository(ConnectionString);
             _channels = new ChannelRepository(ConnectionString, AsyncDbLock);
             _epg = new EpgRepository(ConnectionString, AsyncDbLock);
@@ -58,6 +60,7 @@ namespace StreamMesh.Core.Database
             _sources = new SourceRepository(ConnectionString);
             _iptv = new IptvRepository(ConnectionString);
             _logo = new LogoRepository(ConnectionString);
+            _iptvOrg = new IptvOrgRepository(ConnectionString, AsyncDbLock);
         }
 
         public async Task InitializeAsync()
@@ -192,10 +195,26 @@ namespace StreamMesh.Core.Database
                         Status TEXT,
                         ExpiryDate TEXT
                     );
-                    CREATE TABLE IF NOT EXISTS LogoIndex (
-                        Key TEXT PRIMARY KEY,
-                        FileName TEXT
+                    CREATE TABLE IF NOT EXISTS IptvOrgCache (
+                        Id TEXT PRIMARY KEY,
+                        Name TEXT,
+                        Country TEXT,
+                        Languages TEXT,
+                        Categories TEXT,
+                        Logo TEXT,
+                        Website TEXT,
+                        EpgId TEXT,
+                        UpdatedAt TEXT
                     );
+                    CREATE TABLE IF NOT EXISTS IptvOrgAuditLog (
+                        Id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        ChannelName TEXT,
+                        FieldName TEXT,
+                        OldValue TEXT,
+                        NewValue TEXT,
+                        CreatedAt TEXT
+                    );
+                    CREATE INDEX IF NOT EXISTS idx_iptvorg_name ON IptvOrgCache (Name);
                     CREATE TABLE IF NOT EXISTS MetadataPool (
                         Id INTEGER PRIMARY KEY AUTOINCREMENT,
                         SearchQuery TEXT,
@@ -223,6 +242,25 @@ namespace StreamMesh.Core.Database
                     CREATE INDEX IF NOT EXISTS idx_channels_pwc_date ON Channels (PersonalWatchCount, AddedDate);
                     CREATE INDEX IF NOT EXISTS idx_epg_source ON EpgPrograms (SourceUrl);
                     CREATE INDEX IF NOT EXISTS idx_epgchannels_source ON EpgChannels (SourceUrl);
+
+                    CREATE TRIGGER IF NOT EXISTS trg_channels_fts_ai AFTER INSERT ON Channels BEGIN
+                        INSERT INTO Channels_FTS (id, name, group_title, category)
+                        VALUES (new.Id, new.Name, COALESCE(new.GroupTitle, ''), COALESCE(new.Category, 'TV'));
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS trg_channels_fts_ad AFTER DELETE ON Channels BEGIN
+                        DELETE FROM Channels_FTS WHERE id = old.Id;
+                    END;
+
+                    CREATE TRIGGER IF NOT EXISTS trg_channels_fts_au AFTER UPDATE ON Channels BEGIN
+                        DELETE FROM Channels_FTS WHERE id = old.Id;
+                        INSERT INTO Channels_FTS (id, name, group_title, category)
+                        VALUES (new.Id, new.Name, COALESCE(new.GroupTitle, ''), COALESCE(new.Category, 'TV'));
+                    END;
+
+                    INSERT INTO Channels_FTS (id, name, group_title, category)
+                    SELECT Id, Name, COALESCE(GroupTitle, ''), COALESCE(Category, 'TV') FROM Channels
+                    WHERE Id NOT IN (SELECT id FROM Channels_FTS);
                 ";
                 await command.ExecuteNonQueryAsync();
 
@@ -480,8 +518,8 @@ namespace StreamMesh.Core.Database
         public async Task<List<Channel>> GetSeriesEpisodesAsync(string seriesBaseName) => await _channels.GetSeriesEpisodesAsync(seriesBaseName);
         public async Task<List<Channel>> GetAllChannelsAsync() => await _channels.GetAllChannelsAsync();
         public async Task<Channel?> GetChannelByIdAsync(string id) => await _channels.GetChannelByIdAsync(id);
-        public async Task SaveChannelAsync(Channel ch) => await _channels.SaveChannelAsync(ch);
-        public async Task SaveChannelsBatchAsync(List<Channel> channels, bool clearFirst = false, bool notifyUpdated = true) => await _channels.SaveChannelsBatchAsync(channels, clearFirst, notifyUpdated);
+        public async Task<Channel> SaveChannelAsync(Channel ch, bool notifyUpdated = true) => await _channels.SaveChannelAsync(ch, notifyUpdated);
+        public async Task<(int added, int updated)> SaveChannelsBatchAsync(List<Channel> channels, bool clearFirst = false, bool notifyUpdated = true) => await _channels.SaveChannelsBatchAsync(channels, clearFirst, notifyUpdated);
         public async Task SyncIncomingChannelsAsync(List<Channel> incoming) => await _channels.SyncIncomingChannelsAsync(incoming);
         public async Task<int> AutoAggregateDatabaseAsync() => await _channels.AutoAggregateDatabaseAsync();
         public async Task<int> GetTotalChannelCountAsync() => await _channels.GetTotalChannelCountAsync();
@@ -528,6 +566,13 @@ namespace StreamMesh.Core.Database
         public void UpdateLogoIndex(List<(string key, string file)> items) => _logo.UpdateLogoIndex(items);
         public Dictionary<string, string> GetAllLogoIndex() => _logo.GetAllLogoIndex();
         public string? FindLogoInIndex(string key) => _logo.FindLogoInIndex(key);
+
+        // IPTV-Org delegators
+        public async Task SaveIptvOrgCacheAsync(List<IptvOrgMetadataItem> items) => await _iptvOrg.SaveBatchAsync(items);
+        public async Task<IptvOrgMetadataItem?> FindIptvOrgMatchAsync(string channelName, string epgId, string channelLanguage = "") => await _iptvOrg.FindMatchAsync(channelName, epgId, channelLanguage);
+        public async Task<List<IptvOrgMetadataItem>> SearchIptvOrgCacheAsync(string query) => await _iptvOrg.SearchCacheAsync(query);
+        public async Task LogIptvOrgAuditAsync(string channelName, string fieldName, string oldValue, string newValue) => await _iptvOrg.LogAuditAsync(channelName, fieldName, oldValue, newValue);
+        public async Task<List<IptvOrgAuditLogItem>> GetIptvOrgAuditLogsAsync(string? channelFilter = null, string? fieldFilter = null, int limit = 200) => await _iptvOrg.GetAuditLogsAsync(channelFilter, fieldFilter, limit);
 
         // Utility
         public void ExecuteRawNonQuery(string sql)

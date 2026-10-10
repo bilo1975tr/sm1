@@ -212,7 +212,6 @@
                                                 Click="GroupChip_Click" Tag="{Binding Name}" Cursor="Hand">
                                             <Button.ContextMenu>
                                                 <ContextMenu>
-                                                    <MenuItem Header="🤖 Bu Grubu Yerel AI ile Temizle &amp; Doğrula" Click="AiEnrichGroupContext_Click" CommandParameter="{Binding}"/>
                                                     <MenuItem Header="⚡ Bu Grubun Kanallarını Doğrula" Click="ValidateGroupContext_Click" CommandParameter="{Binding}"/>
                                                 </ContextMenu>
                                             </Button.ContextMenu>

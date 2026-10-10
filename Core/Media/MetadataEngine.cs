@@ -1,12 +1,10 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Net.Http;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
-using Newtonsoft.Json.Linq;
 using StreamMesh.Models;
 using StreamMesh.Core.Database;
-using StreamMesh.Core.Network;
 using StreamMesh.Core.Utils;
 
 namespace StreamMesh.Core.Media
@@ -20,128 +18,42 @@ namespace StreamMesh.Core.Media
             if (channel == null) return;
 
             string cat = (channel.Category ?? "").Trim().ToUpperInvariant();
+            string group = (channel.GroupTitle ?? "").Trim().ToUpperInvariant();
             bool isMedia = cat == "FILM" || cat == "MOVIE" || cat == "DIZI" || cat == "SERIES" ||
+                           group.Contains("FILM") || group.Contains("MOVIE") || group.Contains("SINEMA") ||
+                           group.Contains("DIZI") || group.Contains("SERIES") ||
                            !string.IsNullOrWhiteSpace(channel.SeriesBaseName) ||
                            channel.SeasonNumber > 0 || channel is SeriesGroup;
 
             if (!isMedia) return;
 
-            // If already enriched with overview and backdrop, skip
-            if (!string.IsNullOrWhiteSpace(channel.Overview) && !string.IsNullOrWhiteSpace(channel.BackdropUrl) && !string.IsNullOrWhiteSpace(channel.Cast)) return;
+            // If already enriched with overview and backdrop/imdb, skip
+            if (!string.IsNullOrWhiteSpace(channel.Overview) && (!string.IsNullOrWhiteSpace(channel.BackdropUrl) || !string.IsNullOrWhiteSpace(channel.ImdbId))) return;
 
             // 1. Determine clean search query
             string query = !string.IsNullOrWhiteSpace(channel.SeriesBaseName) ? channel.SeriesBaseName : channel.CleanName;
-            if (string.IsNullOrWhiteSpace(query)) query = channel.Name;
+            if (string.IsNullOrWhiteSpace(query)) query = channel.PrimaryName ?? channel.Name;
 
             query = CleanQueryForMetadata(query);
             if (string.IsNullOrWhiteSpace(query) || query.Length < 2) return;
 
-            // 2. Check local pool first
-            var pooled = await _db.GetMetadataPoolForQueryAsync(query);
-            if (pooled != null && pooled.Count > 0)
-            {
-                ApplyMetadata(channel, pooled[0]);
-                await _db.SaveChannelAsync(channel);
-                return;
-            }
-
-            // 3. Check Daily Limit
-            var stats = _db.GetDailyQueryStats();
-            if (stats.count >= 1000) return;
-
-            // 4. Fetch from API (TMDB)
-            string apiKey = _db.GetSetting("TmdbApiKey", "");
-            if (string.IsNullOrEmpty(apiKey))
-            {
-                return;
-            }
-            bool isSeries = cat == "DIZI" || cat == "SERIES" || !string.IsNullOrWhiteSpace(channel.SeriesBaseName) || channel is SeriesGroup;
-
-            string endpoint = isSeries ? "search/tv" : "search/multi";
-            string url = $"https://api.themoviedb.org/3/{endpoint}?api_key={apiKey}&query={Uri.EscapeDataString(query)}&language=tr-TR";
-
             try
             {
-                var response = await MediaHttpClient.GetStringAsync(url);
-                var json = JObject.Parse(response);
-                var results = json["results"] as JArray;
-
-                if ((results == null || results.Count == 0) && isSeries)
+                // 2. Check local pool first (Cache Hit Check)
+                var pooled = await _db.GetMetadataPoolForQueryAsync(query);
+                if (pooled != null && pooled.Count > 0)
                 {
-                    url = $"https://api.themoviedb.org/3/search/multi?api_key={apiKey}&query={Uri.EscapeDataString(query)}&language=tr-TR";
-                    response = await MediaHttpClient.GetStringAsync(url);
-                    json = JObject.Parse(response);
-                    results = json["results"] as JArray;
-                }
-
-                if (results != null && results.Count > 0)
-                {
-                    _db.IncrementDailyQueryCount();
-                    var metaResults = new List<MetadataResult>();
-
-                    foreach (var item in results)
+                    if (pooled[0].ImdbId != "NOT_FOUND")
                     {
-                        string title = item["title"]?.ToString() ?? item["name"]?.ToString() ?? "";
-                        string overview = item["overview"]?.ToString() ?? "";
-                        string posterPath = item["poster_path"]?.ToString() ?? "";
-                        string backdropPath = item["backdrop_path"]?.ToString() ?? "";
-                        string releaseDate = item["release_date"]?.ToString() ?? item["first_air_date"]?.ToString() ?? "";
-                        double voteAvg = item["vote_average"]?.Value<double>() ?? 0;
-                        string tmdbId = item["id"]?.ToString() ?? "";
-
-                        string posterUrl = !string.IsNullOrEmpty(posterPath) ? "https://image.tmdb.org/t/p/w500" + posterPath : "";
-                        string backdropUrl = !string.IsNullOrEmpty(backdropPath) ? "https://image.tmdb.org/t/p/original" + backdropPath : "";
-
-                        var res = new MetadataResult
-                        {
-                            ImdbId = tmdbId,
-                            Title = title,
-                            Overview = overview,
-                            PosterUrl = posterUrl,
-                            BackdropUrl = backdropUrl,
-                            ReleaseDate = releaseDate,
-                            VoteAverage = voteAvg,
-                            MediaType = item["media_type"]?.ToString() ?? (isSeries ? "tv" : "movie")
-                        };
-
-                        // Optionally fetch credits/cast if tmdbId is present
-                        if (!string.IsNullOrEmpty(tmdbId))
-                        {
-                            try
-                            {
-                                string mediaType = res.MediaType == "tv" ? "tv" : "movie";
-                                string creditsUrl = $"https://api.themoviedb.org/3/{mediaType}/{tmdbId}/credits?api_key={apiKey}&language=tr-TR";
-                                var creditsResp = await MediaHttpClient.GetStringAsync(creditsUrl);
-                                var creditsJson = JObject.Parse(creditsResp);
-                                var castArray = creditsJson["cast"] as JArray;
-                                if (castArray != null && castArray.Count > 0)
-                                {
-                                    var castNames = new List<string>();
-                                    for (int i = 0; i < Math.Min(5, castArray.Count); i++)
-                                    {
-                                        string actorName = castArray[i]["name"]?.ToString() ?? "";
-                                        if (!string.IsNullOrWhiteSpace(actorName)) castNames.Add(actorName);
-                                    }
-                                    res.Cast = string.Join(", ", castNames);
-                                }
-                            }
-                            catch { }
-                        }
-
-                        metaResults.Add(res);
+                        ApplyMetadata(channel, pooled[0]);
+                        await _db.SaveChannelAsync(channel, notifyUpdated: false);
                     }
-
-                    // Save all results to pool for caching
-                    await _db.SaveMetadataPoolResultsAsync(query, metaResults);
-
-                    // Apply first result to target channel
-                    ApplyMetadata(channel, metaResults[0]);
-                    await _db.SaveChannelAsync(channel);
+                    return;
                 }
             }
             catch (Exception ex)
             {
-                LogService.LogError($"MetadataEngine.EnrichChannelAsync failed for '{query}'", ex);
+                LogService.LogError($"MetadataEngine.EnrichChannelAsync pool lookup failed for '{query}'", ex);
             }
         }
 
@@ -160,12 +72,22 @@ namespace StreamMesh.Core.Media
 
         private void ApplyMetadata(Channel target, MetadataResult source)
         {
-            if (source == null) return;
+            if (source == null || source.ImdbId == "NOT_FOUND") return;
             if (!string.IsNullOrWhiteSpace(source.Overview)) target.Overview = source.Overview;
             if (!string.IsNullOrWhiteSpace(source.BackdropUrl)) target.BackdropUrl = source.BackdropUrl;
-            if (!string.IsNullOrWhiteSpace(source.PosterUrl) && (string.IsNullOrWhiteSpace(target.LogoUrl) || target.LogoUrl.Contains("resimlink"))) target.LogoUrl = source.PosterUrl;
+            if (!string.IsNullOrWhiteSpace(source.PosterUrl) && (string.IsNullOrWhiteSpace(target.LogoUrl) || target.LogoUrl.Contains("resimlink") || !target.LogoUrl.StartsWith("http"))) target.LogoUrl = source.PosterUrl;
             if (!string.IsNullOrWhiteSpace(source.ImdbId)) target.ImdbId = source.ImdbId;
             if (!string.IsNullOrWhiteSpace(source.Cast)) target.Cast = source.Cast;
+
+            if (target is SeriesGroup sg && sg.Episodes != null)
+            {
+                foreach (var ep in sg.Episodes)
+                {
+                    if (string.IsNullOrWhiteSpace(ep.Overview) && !string.IsNullOrWhiteSpace(source.Overview)) ep.Overview = source.Overview;
+                    if (string.IsNullOrWhiteSpace(ep.BackdropUrl) && !string.IsNullOrWhiteSpace(source.BackdropUrl)) ep.BackdropUrl = source.BackdropUrl;
+                    if (string.IsNullOrWhiteSpace(ep.Cast) && !string.IsNullOrWhiteSpace(source.Cast)) ep.Cast = source.Cast;
+                }
+            }
         }
     }
 }

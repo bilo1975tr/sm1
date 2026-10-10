@@ -186,17 +186,6 @@ namespace StreamMesh.Core.Media
                     }
                 }
 
-                // Logo senkronizasyonunu ve eksik logoların zenginleştirilmesini tetikle
-                try
-                {
-                    var logoSync = new LogoSyncService();
-                    await logoSync.SyncIfNecessaryAsync();
-                }
-                catch (Exception logoEx)
-                {
-                    LogService.LogWarning($"GitHubSyncEngine: LogoSync tetikleme uyarısı: {logoEx.Message}");
-                }
-
                 var finalCount = (await _db.GetAllChannelsAsync()).Count;
                 LogService.LogInfo($"GitHubSyncEngine: Senkronizasyon sonu SQLite veritabanında toplam {finalCount} kanal mevcut.");
 

@@ -120,7 +120,6 @@ namespace StreamMesh.Core.Media
 
                 foreach (var ch in channels)
                 {
-                    // If no EPG ID and not locked, mark for auto-matching
                     if (string.IsNullOrEmpty(ch.EpgId) && !ch.IsEpgLocked)
                     {
                         channelsToAutoMatch.Add(ch);
@@ -130,20 +129,6 @@ namespace StreamMesh.Core.Media
                     string clean = ChannelUtils.GetCleanName(ch.Name);
                     if (!string.IsNullOrWhiteSpace(clean)) namesToTry.Add(clean);
                     foreach (var id in ch.GetEpgIdList()) namesToTry.Add(id);
-                }
-
-                // Perform Smart Auto-Matching for eligible channels
-                if (channelsToAutoMatch.Count > 0)
-                {
-                    await PerformSmartEpgMatchAsync(channelsToAutoMatch);
-                    // Re-add potentially new EPG IDs to namesToTry
-                    foreach (var ch in channelsToAutoMatch)
-                    {
-                        if (!string.IsNullOrEmpty(ch.EpgId))
-                        {
-                            foreach (var id in ch.GetEpgIdList()) namesToTry.Add(id);
-                        }
-                    }
                 }
 
                 var programs = await _db.GetEpgForChannelsAsync(namesToTry.ToList());
@@ -195,6 +180,11 @@ namespace StreamMesh.Core.Media
                         if (ch.CurrentEpgTitle != "Yayın akışı bilgisi yok") ch.CurrentEpgTitle = "Yayın akışı bilgisi yok";
                         if (ch.CurrentEpgTime != "--:--") ch.CurrentEpgTime = "--:--";
                     }
+                }
+
+                if (channelsToAutoMatch.Count > 0)
+                {
+                    _ = Task.Run(() => PerformSmartEpgMatchAsync(channelsToAutoMatch));
                 }
             }
             catch (Exception ex)
@@ -292,10 +282,6 @@ namespace StreamMesh.Core.Media
 
                         if (best != null && !string.IsNullOrEmpty(best.EpgId))
                         {
-                            channel.EpgId = best.EpgId;
-                            try { _db.SaveChannelSync(channel); } catch { }
-                            LogService.LogInfo($"[SmartEPG] Dynamic auto-matched '{channel.Name}' to EPG ID '{best.EpgId}'");
-
                             var matchedPrograms = await _db.GetEpgForChannelsAsync(new List<string> { best.EpgId });
                             if (matchedPrograms != null && matchedPrograms.Count > 0)
                             {
@@ -334,8 +320,6 @@ namespace StreamMesh.Core.Media
 
                     if (!nameMatch) return false;
 
-                    // V1.9.9: Added Language check to avoid cross-language mismatches (e.g. Discovery TR vs DE)
-                    // If target channel has a defined language, ensure the EPG channel matches it.
                     if (!string.IsNullOrEmpty(ch.Language) && ch.Language != "und")
                     {
                         return ChannelUtils.MatchesLanguageFilter(r.ChannelName, ch.Language);
@@ -353,7 +337,6 @@ namespace StreamMesh.Core.Media
 
             if (updatedChannels.Count > 0)
             {
-                // Silently save back to DB to "cement" the auto-link without triggering UI refresh loop
                 await _db.SaveChannelsBatchAsync(updatedChannels, clearFirst: false, notifyUpdated: false);
             }
         }

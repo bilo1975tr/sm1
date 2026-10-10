@@ -52,6 +52,20 @@ namespace StreamMesh.Core.Media
                     bool isSeriesMismatch = (ch.SeasonNumber > 0 && matched.SeasonNumber > 0 && (ch.SeasonNumber != matched.SeasonNumber || ch.EpisodeNumber != matched.EpisodeNumber)) ||
                                             (ch.EpisodeNumber > 0 && matched.EpisodeNumber > 0 && ch.EpisodeNumber != matched.EpisodeNumber);
 
+                    // SAFETY CHECK: If host+path+params (if any) matched, still ensure channel names are similar
+                    if (matched != null)
+                    {
+                        string cleanName1 = ChannelUtils.GetCleanName(ch.Name);
+                        string cleanName2 = ChannelUtils.GetCleanName(matched.Name);
+                        if (!string.IsNullOrEmpty(cleanName1) && !string.IsNullOrEmpty(cleanName2) &&
+                            !cleanName1.Equals(cleanName2, StringComparison.OrdinalIgnoreCase) &&
+                            !cleanName1.Contains(cleanName2, StringComparison.OrdinalIgnoreCase) &&
+                            !cleanName2.Contains(cleanName1, StringComparison.OrdinalIgnoreCase))
+                        {
+                            isSeriesMismatch = true; // Treat as mismatch
+                        }
+                    }
+
                     if (isSeriesMismatch)
                     {
                         matched = null;

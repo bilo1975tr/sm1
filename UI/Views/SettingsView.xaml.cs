@@ -21,7 +21,6 @@ namespace StreamMesh.UI.Views
     {
         public SettingsViewModel ViewModel { get; } = new SettingsViewModel();
         private readonly DatabaseEngine _db = new DatabaseEngine();
-        private readonly AiEngine _ai = new AiEngine();
         private readonly XtreamService _xtream = new XtreamService();
 
         private bool _isServerRunning = false;
@@ -32,7 +31,6 @@ namespace StreamMesh.UI.Views
             InitializeComponent();
             DataContext = ViewModel;
             if (ValidationLogsList != null) ValidationLogsList.ItemsSource = ViewModel.ValidationLogs;
-            if (AiLogsList != null) AiLogsList.ItemsSource = ViewModel.AiLogs;
 
             ViewModel.PropertyChanged += (s, e) => {
                 if (e.PropertyName == nameof(ViewModel.SyncStatus)) {
@@ -54,9 +52,41 @@ namespace StreamMesh.UI.Views
             if (AudioNormCheck != null) AudioNormCheck.IsChecked = _db.GetSetting("AudioNormEnabled", "true") == "true";
             if (VideoSharpenCheck != null) VideoSharpenCheck.IsChecked = _db.GetSetting("VideoEnhanceEnabled", "false") == "true";
 
-            UpdateQuotaUI();
             UpdateServerStatusUI();
             RefreshEpgList();
+            _ = LoadAuditLogsAsync();
+        }
+
+        private async void RefreshAuditLogs_Click(object sender, RoutedEventArgs e)
+        {
+            await LoadAuditLogsAsync();
+        }
+
+        private async void AuditFilter_Changed(object sender, SelectionChangedEventArgs e)
+        {
+            await LoadAuditLogsAsync();
+        }
+
+        private async void AuditFilter_Changed(object sender, TextChangedEventArgs e)
+        {
+            await LoadAuditLogsAsync();
+        }
+
+        private async Task LoadAuditLogsAsync()
+        {
+            try
+            {
+                string chSearch = AuditChannelSearchBox?.Text ?? "";
+                string fieldFilter = (AuditFieldFilterCombo?.SelectedItem as ComboBoxItem)?.Content?.ToString() ?? "Tüm Alanlar";
+                if (fieldFilter == "Tüm Alanlar") fieldFilter = "";
+
+                var logs = await _db.GetIptvOrgAuditLogsAsync(chSearch, fieldFilter, 200);
+                if (AuditLogListView != null)
+                {
+                    AuditLogListView.ItemsSource = logs;
+                }
+            }
+            catch { }
         }
 
         private void RefreshSourcesList() => ViewModel.RefreshSources();
@@ -249,19 +279,6 @@ namespace StreamMesh.UI.Views
             }
         }
 
-        private void UpdateQuotaUI()
-        {
-            var stats = _db.GetDailyQueryStats();
-            if (TmdbQuotaText != null) TmdbQuotaText.Text = $"{stats.count} / 1000";
-        }
-
-        private void AiProvider_SelectionChanged(object sender, SelectionChangedEventArgs e)
-        {
-            if (AiUrlBox == null) return;
-            if (AiProviderCombo.SelectedIndex == 0) ViewModel.AiUrl = "http://localhost:11434/api/chat";
-            else if (AiProviderCombo.SelectedIndex == 1) ViewModel.AiUrl = "http://localhost:1234/v1/chat/completions";
-        }
-
         private void SaveSettings_Click(object sender, RoutedEventArgs e)
         {
             ViewModel.SaveSettings();
@@ -305,25 +322,6 @@ namespace StreamMesh.UI.Views
             {
                 _db.RemoveM3uSource(url);
                 RefreshSourcesList();
-            }
-        }
-
-        private async void FetchModels_Click(object sender, RoutedEventArgs e)
-        {
-            var result = await _ai.AutoDetectAndConfigureAsync();
-            if (result.success && result.models.Count > 0)
-            {
-                ViewModel.AiModel = result.model;
-                ViewModel.AiUrl = result.url;
-                if (AiProviderCombo != null)
-                {
-                    AiProviderCombo.SelectedIndex = result.provider == "LM Studio" ? 1 : 0;
-                }
-                System.Windows.MessageBox.Show($"✅ {result.provider} Servisi Algılandı!\nSeçilen Model: {result.model}\nMevcut Modeller: {string.Join(", ", result.models)}", "Yapay Zeka Hazır");
-            }
-            else
-            {
-                System.Windows.MessageBox.Show("Yerel AI sunucusuna bağlanılamadı.\nLütfen Ollama (11434) veya LM Studio (1234) uygulamasının çalıştığından ve bir model yüklü olduğundan emin olun.", "AI Servisi Bulunamadı");
             }
         }
 
@@ -605,94 +603,6 @@ namespace StreamMesh.UI.Views
         }
 
         private void StopValidation_Click(object sender, RoutedEventArgs e) => _validationCts?.Cancel();
-
-        private async void RunLocalAiNormalization_Click(object sender, RoutedEventArgs e)
-        {
-            var aiEngine = new LocalAiNormalizationEngine();
-            bool available = await aiEngine.IsLocalAiAvailableAsync();
-            if (!available)
-            {
-                System.Windows.MessageBox.Show("Yerel Yapay Zeka (Ollama veya LM Studio) aktif değil veya model yüklenmemiş.\nLütfen LM Studio'da bir model yükleyip Local Server'ı başlattığınızdan emin olun.", "Yapay Zeka Bağlantı Hatası", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            var result = System.Windows.MessageBox.Show("Yerel Yapay Zeka kütüphanenizdeki kanalları temizlemeye ve kategorize etmeye başlayacak.\nBu işlem arka planda sürerken uygulama çalışmaya devam edecektir. Başlasın mı?", "Yerel AI Normalizasyonu", MessageBoxButton.YesNo, MessageBoxImage.Question);
-            if (result != MessageBoxResult.Yes) return;
-
-            try
-            {
-                int totalChannels = await _db.GetTotalChannelCountAsync();
-                if (totalChannels == 0)
-                {
-                    System.Windows.MessageBox.Show("Kütüphanede düzenlenecek kanal bulunamadı.", "Bilgi", MessageBoxButton.OK, MessageBoxImage.Information);
-                    return;
-                }
-
-                System.Windows.MessageBox.Show($"Kütüphanenizdeki {totalChannels} kanal Yerel Yapay Zeka kuyruğuna alındı. İşlem arka planda yürütülecektir.", "İşlem Başlatıldı", MessageBoxButton.OK, MessageBoxImage.Information);
-
-                ViewModel.AiLogs.Clear();
-                ViewModel.AiBatchReports.Clear();
-                ViewModel.AiLogs.Insert(0, $"{DateTime.Now:HH:mm:ss} - 🤖 AI Optimizasyonu başlatıldı ({totalChannels} toplam kanal).");
-
-                _ = Task.Run(async () =>
-                {
-                    int page = 1;
-                    int batchSize = 500;
-                    while (true)
-                    {
-                        var (chunk, count) = await _db.GetPagedChannelsAsync(null, "All", null, null, 0, page, batchSize).ConfigureAwait(false);
-                        if (chunk == null || chunk.Count == 0) break;
-
-                        var originalStates = chunk.ToDictionary(c => c.Id, c => (name: c.Name, cat: c.Category));
-
-                        Dispatcher.Invoke(() => ViewModel.AiLogs.Insert(0, $"{DateTime.Now:HH:mm:ss} - Sayfa {page} işleniyor (500 kanal batch)..."));
-
-                        await aiEngine.NormalizeChannelsWithAiAsync(chunk, (msg, processed, total) =>
-                        {
-                            LogService.LogInfo($"[AI Normalization] {msg} ({processed}/{total})");
-                            Dispatcher.Invoke(() => ViewModel.AiLogs.Insert(0, $"{DateTime.Now:HH:mm:ss} - {msg} ({processed}/{total})"));
-                        });
-
-                        var batchReport = new AiBatchReportItem { PageNumber = page, Title = $"Sayfa {page} Batch" };
-                        foreach (var ch in chunk)
-                        {
-                            if (originalStates.TryGetValue(ch.Id, out var orig))
-                            {
-                                batchReport.Records.Add(new AiChangeRecord {
-                                    ChannelId = ch.Id,
-                                    OldName = orig.name,
-                                    NewName = ch.Name,
-                                    OldCategory = orig.cat,
-                                    NewCategory = ch.Category
-                                });
-                            }
-                        }
-
-                        Dispatcher.Invoke(() => ViewModel.AiBatchReports.Insert(0, batchReport));
-                        await _db.SaveChannelsBatchAsync(chunk);
-                        page++;
-                    }
-                    DatabaseEngine.NotifyDatabaseUpdated();
-                    Dispatcher.Invoke(() => ViewModel.AiLogs.Insert(0, $"{DateTime.Now:HH:mm:ss} - 🎉 AI Optimizasyonu başarıyla tamamlandı!"));
-                    LogService.LogInfo("[AI Normalization] Tüm kanallar Yapay Zeka ile güncellendi ve veritabanına kaydedildi!");
-                });
-            }
-            catch (Exception ex)
-            {
-                LogService.LogError("RunLocalAiNormalization_Click error", ex);
-                System.Windows.MessageBox.Show($"Hata: {ex.Message}", "Hata", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-        }
-
-        private void AiBatchItem_DoubleClicked(object sender, System.Windows.Input.MouseButtonEventArgs e)
-        {
-            if (AiBatchesList.SelectedItem is AiBatchReportItem reportItem)
-            {
-                var win = new AiBatchDetailsWindow(reportItem);
-                win.Owner = Window.GetWindow(this);
-                win.ShowDialog();
-            }
-        }
 
         private static string GetChannelHostKey(Channel ch)
         {

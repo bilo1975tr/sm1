@@ -219,14 +219,51 @@ namespace StreamMesh.Core.Media
 
             foreach (var ch in channels)
             {
+                bool modified = false;
                 if (string.IsNullOrWhiteSpace(ch.LogoUrl))
                 {
                     string? indexedLogo = GetLogoFromIndex(ch.Name);
                     if (!string.IsNullOrEmpty(indexedLogo))
                     {
                         ch.LogoUrl = indexedLogo;
-                        updatedChannels.Add(ch);
+                        modified = true;
                     }
+                }
+
+                // Safe iptv-org reference enrichment with audit logging and strict language matching
+                try
+                {
+                    var match = await _db.FindIptvOrgMatchAsync(ch.Name, ch.EpgId, ch.Language);
+                    if (match != null)
+                    {
+                        if (string.IsNullOrWhiteSpace(ch.EpgId) && !string.IsNullOrWhiteSpace(match.EpgId))
+                        {
+                            string old = ch.EpgId;
+                            ch.EpgId = match.EpgId;
+                            modified = true;
+                            await _db.LogIptvOrgAuditAsync(ch.Name, "EpgId", old, ch.EpgId);
+                        }
+                        if (string.IsNullOrWhiteSpace(ch.LogoUrl) && !string.IsNullOrWhiteSpace(match.Logo))
+                        {
+                            string old = ch.LogoUrl;
+                            ch.LogoUrl = match.Logo;
+                            modified = true;
+                            await _db.LogIptvOrgAuditAsync(ch.Name, "LogoUrl", old, ch.LogoUrl);
+                        }
+                        if ((string.IsNullOrWhiteSpace(ch.Language) || ch.Language == "und") && !string.IsNullOrWhiteSpace(match.Languages))
+                        {
+                            string old = ch.Language;
+                            ch.Language = match.Languages;
+                            modified = true;
+                            await _db.LogIptvOrgAuditAsync(ch.Name, "Language", old, ch.Language);
+                        }
+                    }
+                }
+                catch { }
+
+                if (modified)
+                {
+                    updatedChannels.Add(ch);
                 }
             }
 

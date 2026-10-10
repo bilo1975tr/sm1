@@ -492,7 +492,7 @@ namespace StreamMesh.UI.Views
             }
         }
 
-        private async void UpdateChannelLogo(Channel channel)
+        private void UpdateChannelLogo(Channel channel)
         {
             if (channel == null || OsdLogo == null || OsdLogoFallback == null) return;
 
@@ -502,23 +502,6 @@ namespace StreamMesh.UI.Views
                 if (!string.IsNullOrWhiteSpace(channel.PrimaryLogoUrl))
                 {
                     converted = LogoConverter.Convert(channel.PrimaryLogoUrl, typeof(ImageSource), null!, System.Globalization.CultureInfo.InvariantCulture) as ImageSource;
-                }
-
-                // Fallback: If no logo or conversion failed, search locally/online via LogoSearchEngine
-                if (converted == null)
-                {
-                    string cleanName = ChannelUtils.GetCleanName(channel.PrimaryName ?? channel.Name ?? "TV");
-                    var searchResults = await LogoSearchEngine.SearchLogosAsync(cleanName);
-                    if (searchResults != null && searchResults.Count > 0)
-                    {
-                        var firstMatch = searchResults.FirstOrDefault(r => !string.IsNullOrEmpty(r.Url));
-                        if (firstMatch != null)
-                        {
-                            channel.LogoUrl = string.IsNullOrEmpty(channel.LogoUrl) ? firstMatch.Url : $"{channel.LogoUrl},{firstMatch.Url}";
-                            try { _db.SaveChannelSync(channel); } catch { }
-                            converted = LogoConverter.Convert(firstMatch.Url, typeof(ImageSource), null!, System.Globalization.CultureInfo.InvariantCulture) as ImageSource;
-                        }
-                    }
                 }
 
                 if (converted != null)

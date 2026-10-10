@@ -472,10 +472,32 @@ namespace StreamMesh.Core.Media
                 if (url.StartsWith("http://", StringComparison.OrdinalIgnoreCase) || url.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
                 {
                     var uri = new Uri(url);
-                    // Host + Path (Port :80 ve :443 standart olduğundan yoksay, query param'ları token vb. temizle)
                     string host = uri.Host.ToLowerInvariant();
                     string path = uri.AbsolutePath.TrimEnd('/');
-                    return $"{host}{path}";
+
+                    // Identity parameters to KEEP
+                    var whitelistedParams = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+                    {
+                        "id", "channel", "stream", "stream_id"
+                    };
+
+                    string query = uri.Query.TrimStart('?');
+                    if (string.IsNullOrEmpty(query)) return $"{host}{path}";
+
+                    var pairs = query.Split('&', StringSplitOptions.RemoveEmptyEntries);
+                    var kept = new List<string>();
+                    foreach (var pair in pairs)
+                    {
+                        var kv = pair.Split('=', 2);
+                        if (kv.Length == 2 && whitelistedParams.Contains(kv[0].ToLowerInvariant()))
+                        {
+                            kept.Add($"{kv[0].ToLowerInvariant()}={kv[1].ToLowerInvariant()}");
+                        }
+                    }
+                    kept.Sort();
+
+                    string queryString = kept.Count > 0 ? "?" + string.Join("&", kept) : "";
+                    return $"{host}{path}{queryString}";
                 }
             }
             catch { }

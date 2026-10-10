@@ -81,14 +81,14 @@ namespace StreamMesh.UI.Windows
         }
 
         // Matching modes
-        private bool _isExactMatchMode = false;
+        private bool _isExactMatchMode = true; // Default safe exact match mode
         public bool IsExactMatchMode
         {
             get => _isExactMatchMode;
             set { if (_isExactMatchMode != value) { _isExactMatchMode = value; OnPropertyChanged(); } }
         }
 
-        private bool _isContainsMode = true; // Default safe mode
+        private bool _isContainsMode = false;
         public bool IsContainsMode
         {
             get => _isContainsMode;
@@ -286,6 +286,44 @@ namespace StreamMesh.UI.Windows
                 MessageBox.Show("Lütfen ana kanal ile birleştirmek istediğiniz en az 1 adet aday kanal seçin.",
                     "Seçim Yapılmadı", MessageBoxButton.OK, MessageBoxImage.Warning);
                 return;
+            }
+
+            // Validation: Check for distinct channels that don't match main channel name, EPG ID, or Stream URL
+            string mainClean = ChannelUtils.GetCleanName(_mainChannel.PrimaryName);
+            var mainEpgs = new HashSet<string>(_mainChannel.GetEpgIdList(), StringComparer.OrdinalIgnoreCase);
+            var mainUrls = new HashSet<string>(_mainChannel.GetUrlList(), StringComparer.OrdinalIgnoreCase);
+
+            var suspiciousItems = new List<MergeCandidateItem>();
+            foreach (var item in selectedItems)
+            {
+                string candClean = ChannelUtils.GetCleanName(item.Channel.PrimaryName);
+                bool sameName = string.Equals(mainClean, candClean, StringComparison.OrdinalIgnoreCase) ||
+                                (ChannelUtils.ToNormalizedKey(mainClean) == ChannelUtils.ToNormalizedKey(candClean) && !string.IsNullOrEmpty(mainClean));
+
+                bool sameEpg = item.Channel.GetEpgIdList().Any(e => mainEpgs.Contains(e));
+                bool sameUrl = item.Channel.GetUrlList().Any(u => mainUrls.Contains(u));
+
+                if (!sameName && !sameEpg && !sameUrl)
+                {
+                    suspiciousItems.Add(item);
+                }
+            }
+
+            if (suspiciousItems.Count > 0)
+            {
+                string suspiciousNames = string.Join(", ", suspiciousItems.Take(5).Select(x => $"'{x.Channel.PrimaryName}'"));
+                if (suspiciousItems.Count > 5) suspiciousNames += $" ve {suspiciousItems.Count - 5} diğer kanal";
+
+                var warnResult = MessageBox.Show(
+                    $"⚠️ UYARI: Seçtiğiniz aşağıdaki kanallar '{_mainChannel.PrimaryName}' ana kanalı ile FARKLIDIR:\n\n" +
+                    $"{suspiciousNames}\n\n" +
+                    $"Bu farklı kanalları birleştirmek, farklı istasyon isimlerinin, yayın kaynaklarının ve logoların karışmasına neden olur.\n\n" +
+                    $"Yine de devam etmek istiyor musunuz?",
+                    "Farklı Kanal Birleştirme Uyarısı",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Warning);
+
+                if (warnResult != MessageBoxResult.Yes) return;
             }
 
             var confirmResult = MessageBox.Show(

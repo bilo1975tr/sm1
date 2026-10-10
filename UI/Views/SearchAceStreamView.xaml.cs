@@ -141,9 +141,10 @@ namespace StreamMesh.UI.Views
                     return ch;
                 }).ToList();
 
-                await _db.SaveChannelsBatchAsync(channels, clearFirst: false);
+                var (addedCount, updatedCount) = await _db.SaveChannelsBatchAsync(channels, clearFirst: false);
+
                 DatabaseEngine.NotifyDatabaseUpdated();
-                System.Windows.MessageBox.Show($"{channels.Count} adet kanal ve medya akışı başarıyla kütüphanenize eklendi.", "Toplu Ekleme Başarılı", MessageBoxButton.OK, MessageBoxImage.Information);
+                System.Windows.MessageBox.Show($"Toplu Ekleme Tamamlandı!\n\n• Yeni Eklendi: {addedCount}\n• Güncellendi/Var Olan: {updatedCount}\n• Toplam İşlenen: {channels.Count}", "Toplu Ekleme Sonucu", MessageBoxButton.OK, MessageBoxImage.Information);
             }
             catch (Exception ex)
             {
@@ -191,9 +192,20 @@ namespace StreamMesh.UI.Views
 
                     SmartNormalizationEngine.Instance.NormalizeChannel(ch);
 
-                    await _db.SaveChannelAsync(ch);
-                    DatabaseEngine.NotifyDatabaseUpdated();
-                    System.Windows.MessageBox.Show($"'{ch.Name}' başarıyla kütüphanenize eklendi.", "Kütüphaneye Eklendi", MessageBoxButton.OK, MessageBoxImage.Information);
+                    var savedCh = await _db.SaveChannelAsync(ch);
+
+                    if (savedCh != null && !string.IsNullOrEmpty(savedCh.Id))
+                    {
+                        var checkCh = await _db.GetChannelByIdAsync(savedCh.Id);
+                        if (checkCh != null)
+                        {
+                            DatabaseEngine.NotifyDatabaseUpdated();
+                            System.Windows.MessageBox.Show($"'{savedCh.PrimaryName}' kütüphanenize eklendi ve veritabanına kaydedildi.\n\nKategori: {savedCh.Category}\nGrup: {savedCh.GroupTitle}", "Kütüphaneye Eklendi", MessageBoxButton.OK, MessageBoxImage.Information);
+                            return;
+                        }
+                    }
+
+                    System.Windows.MessageBox.Show($"Kanal veritabanına kaydedilemedi. Lütfen tekrar deneyin.", "Kayıt Hatası", MessageBoxButton.OK, MessageBoxImage.Warning);
                 }
                 catch (Exception ex)
                 {

@@ -19,6 +19,13 @@ namespace StreamMesh.UI.Windows
         private Channel _channel;
         private readonly DatabaseEngine _db = new DatabaseEngine();
 
+        public class LogoSearchResult
+        {
+            public string Name { get; set; } = "";
+            public string Url { get; set; } = "";
+            public string Source { get; set; } = "";
+        }
+
         public class StringWrapper : INotifyPropertyChanged
         {
             private string _value = "";
@@ -168,16 +175,35 @@ namespace StreamMesh.UI.Windows
         private async void DoLogoSearch_Click(object sender, RoutedEventArgs e)
         {
             string query = LogoSearchQueryBox.Text;
-            string sourceFilter = "ALL";
-            if (LogoSourceCombo.SelectedIndex == 1) sourceFilter = "TV_LOGOS";
-            else if (LogoSourceCombo.SelectedIndex == 2) sourceFilter = "IPTV_ORG";
-            else if (LogoSourceCombo.SelectedIndex == 3) sourceFilter = "CLEARBIT";
+            if (string.IsNullOrWhiteSpace(query)) return;
 
             LogoSearchResults.Clear();
-            var results = await LogoSearchEngine.SearchLogosAsync(query, sourceFilter);
-            foreach (var r in results) LogoSearchResults.Add(r);
+            try
+            {
+                string sourceFilter = "ALL";
+                if (LogoSourceCombo != null)
+                {
+                    if (LogoSourceCombo.SelectedIndex == 1) sourceFilter = "TV_LOGOS";
+                    else if (LogoSourceCombo.SelectedIndex == 2) sourceFilter = "IPTV_ORG";
+                    else if (LogoSourceCombo.SelectedIndex == 3) sourceFilter = "CLEARBIT";
+                }
 
-            StreamMesh.Core.Utils.LogService.LogInfo($"[EditChannel] Logo search completed for '{query}', found {results.Count} candidates.");
+                var results = await LogoSearchEngine.SearchLogosAsync(query, sourceFilter);
+                foreach (var r in results)
+                {
+                    LogoSearchResults.Add(new LogoSearchResult
+                    {
+                        Name = r.Name,
+                        Url = r.Url,
+                        Source = r.Source
+                    });
+                }
+                StreamMesh.Core.Utils.LogService.LogInfo($"[EditChannel] Logo search completed for '{query}', found {LogoSearchResults.Count} candidates.");
+            }
+            catch (Exception ex)
+            {
+                StreamMesh.Core.Utils.LogService.LogError($"[EditChannel] Logo search failed", ex);
+            }
         }
 
         private void SelectSearchResultLogo_Click(object sender, RoutedEventArgs e)
@@ -507,37 +533,70 @@ namespace StreamMesh.UI.Windows
             }
         }
 
-        private void AutoMatch_Click(object sender, RoutedEventArgs e)
+        private async void AutoMatch_Click(object sender, RoutedEventArgs e)
         {
             try
             {
                 string name = _channel.PrimaryName;
                 if (string.IsNullOrWhiteSpace(name)) return;
 
-                // Use the unified index-based logo matching (strictly following tv-logos convention)
-                string? indexedLogo = ChannelEnricher.GetLogoFromIndex(name);
+                bool foundAnything = false;
 
+                // 1. Local tv-logos lookup
+                string? indexedLogo = ChannelEnricher.GetLogoFromIndex(name);
                 if (!string.IsNullOrEmpty(indexedLogo))
                 {
                     TempLogoList.Clear();
                     TempLogoList.Add(new StringWrapper { Value = indexedLogo });
                     SelectedLogoUrl = indexedLogo;
-                }
-                else
-                {
-                    System.Windows.MessageBox.Show("Veritabanında uygun bir logo bulunamadı. Lütfen manuel aramayı deneyin.", "Logo Bulunamadı", MessageBoxButton.OK, MessageBoxImage.Warning);
+                    foundAnything = true;
                 }
 
-                // 2. EPG Match
+                // 2. iptv-org reference lookup
+                var match = await _db.FindIptvOrgMatchAsync(name, _channel.EpgId, _channel.Language);
+                if (match != null)
+                {
+                    if (!string.IsNullOrWhiteSpace(match.Logo) && string.IsNullOrEmpty(indexedLogo))
+                    {
+                        TempLogoList.Clear();
+                        TempLogoList.Add(new StringWrapper { Value = match.Logo });
+                        SelectedLogoUrl = match.Logo;
+                        foundAnything = true;
+                    }
+                    if (!string.IsNullOrWhiteSpace(match.EpgId))
+                    {
+                        TempEpgList.Clear();
+                        TempEpgList.Add(new StringWrapper { Value = match.EpgId });
+                        foundAnything = true;
+                    }
+                    if (!string.IsNullOrWhiteSpace(match.Languages) && match.Languages != "und")
+                    {
+                        LanguageText = match.Languages;
+                        foundAnything = true;
+                    }
+                }
+
+                // 3. Fallback standard EPG Match if still empty
                 if (TempEpgList.Count == 0 || string.IsNullOrWhiteSpace(TempEpgList[0].Value))
                 {
                     string epgId = name.ToUpper().Replace(" ", ".").Replace("HD", "").Trim('.');
                     TempEpgList.Add(new StringWrapper { Value = $"{epgId}.tr" });
+                    foundAnything = true;
                 }
 
-                System.Windows.MessageBox.Show("Akıllı eşleme tamamlandı. Lütfen listeden logoları seçerek önizlemeyi kontrol edin.", "Akıllı Sihirbaz", MessageBoxButton.OK, MessageBoxImage.Information);
+                if (foundAnything)
+                {
+                    System.Windows.MessageBox.Show("Akıllı Sihirbaz eşlemeyi tamamladı. Lütfen listeleri kontrol edin.", "Akıllı Sihirbaz", MessageBoxButton.OK, MessageBoxImage.Information);
+                }
+                else
+                {
+                    System.Windows.MessageBox.Show("Uygun bir referans eşleşmesi bulunamadı.", "Sihirbaz", MessageBoxButton.OK, MessageBoxImage.Warning);
+                }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                System.Windows.MessageBox.Show($"Arama sırasında hata oluştu: {ex.Message}", "Hata", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
         }
 
         private async void Save_Click(object sender, RoutedEventArgs e)

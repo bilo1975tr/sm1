@@ -18,22 +18,10 @@ namespace StreamMesh.UI.ViewModels
     {
         private readonly DatabaseEngine _db = new DatabaseEngine();
         private readonly GitHubSyncEngine _sync = new GitHubSyncEngine();
-        private readonly AiEngine _ai = new AiEngine();
 
         public ObservableCollection<M3uSourceDisplay> Sources { get; } = new ObservableCollection<M3uSourceDisplay>();
         public ObservableCollection<IptvAccount> IptvAccounts { get; } = new ObservableCollection<IptvAccount>();
         public ObservableCollection<string> ValidationLogs { get; } = new ObservableCollection<string>();
-        public ObservableCollection<string> AiLogs { get; } = new ObservableCollection<string>();
-        public ObservableCollection<AiBatchReportItem> AiBatchReports { get; } = new ObservableCollection<AiBatchReportItem>();
-
-        private string _aiUrl = "";
-        public string AiUrl { get => _aiUrl; set { _aiUrl = value; OnPropertyChanged(); } }
-
-        private string _aiModel = "";
-        public string AiModel { get => _aiModel; set { _aiModel = value; OnPropertyChanged(); } }
-
-        private string _tmdbApiKey = "";
-        public string TmdbApiKey { get => _tmdbApiKey; set { _tmdbApiKey = value; OnPropertyChanged(); } }
 
         private string _serverPort = "8080";
         public string ServerPort { get => _serverPort; set { _serverPort = value; OnPropertyChanged(); } }
@@ -59,9 +47,6 @@ namespace StreamMesh.UI.ViewModels
 
         public void LoadSettings()
         {
-            AiUrl = _db.GetSetting("AiUrl", "http://localhost:11434/api/chat");
-            AiModel = _db.GetSetting("AiModel", "llama3");
-            TmdbApiKey = _db.GetSetting("TmdbApiKey", "3fd2be6f0c70a2a598f084dd23308883");
             ServerPort = _db.GetSetting("ServerPort", "8080");
             RefreshSources();
             RefreshIptvAccounts();
@@ -69,9 +54,6 @@ namespace StreamMesh.UI.ViewModels
 
         public void SaveSettings()
         {
-            _db.SetSetting("AiUrl", AiUrl);
-            _db.SetSetting("AiModel", AiModel);
-            _db.SetSetting("TmdbApiKey", TmdbApiKey);
             _db.SetSetting("ServerPort", ServerPort);
         }
 

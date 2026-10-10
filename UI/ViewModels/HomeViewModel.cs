@@ -618,13 +618,9 @@ namespace StreamMesh.UI.ViewModels
 
                     if (token.IsCancellationRequested) return;
 
-                    // 2. Enrich Logos
-                    var missingLogos = pageItems.Where(c => string.IsNullOrWhiteSpace(c.LogoUrl)).ToList();
-                    if (missingLogos.Count > 0)
-                    {
-                        var enricher = new ChannelEnricher();
-                        await enricher.EnrichChannelsAsync(missingLogos);
-                    }
+                    // 2. Enrich channel metadata safely via iptv-org
+                    var enricher = new ChannelEnricher();
+                    await enricher.EnrichChannelsAsync(pageItems);
                 }
                 catch (OperationCanceledException) { }
                 catch (Exception ex) { LogService.LogWarning($"HomeViewModel: Enrichment background task error: {ex.Message}"); }

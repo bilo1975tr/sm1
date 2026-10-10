@@ -21,7 +21,6 @@ namespace StreamMesh.UI.Windows
 
         private HomeView _homeView = new HomeView();
         private PlayerView _playerView = new PlayerView();
-        private StatsView? _statsView;
         private SettingsView? _settingsView;
         private SearchAceStreamView? _searchAceView;
 
@@ -83,16 +82,25 @@ namespace StreamMesh.UI.Windows
             _epgTimer.Tick += async (s, e) => { await RunAutoEpgUpdateAsync(); };
             _epgTimer.Start();
 
-            // Auto-detect local AI Engine (Ollama / LM Studio) in background
+            // Background iptv-org sync (once per session, non-blocking)
             _ = Task.Run(async () =>
             {
-                await Task.Delay(10000);
+                await Task.Delay(20000);
                 try
                 {
-                    var ai = new AiEngine();
-                    await ai.AutoDetectAndConfigureAsync();
+                    var engine = new IptvOrgEngine();
+                    var channels = await engine.FetchChannelsAsync();
+                    if (channels != null && channels.Count > 0)
+                    {
+                        var db = new StreamMesh.Core.Database.DatabaseEngine();
+                        await db.SaveIptvOrgCacheAsync(channels);
+                        LogService.LogInfo($"[IptvOrg] {channels.Count} kanal referans cache'ine kaydedildi.");
+                    }
                 }
-                catch { }
+                catch (Exception ex)
+                {
+                    LogService.LogWarning($"[IptvOrg] Arka plan senkronizasyon uyarısı: {ex.Message}");
+                }
             });
 
             this.KeyDown += MainWindow_KeyDown;
@@ -389,10 +397,6 @@ namespace StreamMesh.UI.Windows
             {
                 case "Home": MainContent.Content = _homeView; break;
                 case "Player": MainContent.Content = _playerView; break;
-                case "Stats":
-                    _statsView ??= new StatsView();
-                    MainContent.Content = _statsView;
-                    break;
                 case "Settings":
                     _settingsView ??= new SettingsView();
                     MainContent.Content = _settingsView;
@@ -415,13 +419,6 @@ namespace StreamMesh.UI.Windows
             var don = new DonationWindow();
             don.Owner = this;
             don.ShowDialog();
-        }
-
-        private void OpenChat_Click(object sender, RoutedEventArgs e)
-        {
-            var chat = new ChatWindow();
-            chat.Owner = this;
-            chat.Show();
         }
 
         private void PeerCount_Click(object sender, System.Windows.Input.MouseButtonEventArgs e)
@@ -467,61 +464,6 @@ namespace StreamMesh.UI.Windows
             catch (Exception ex)
             {
                 LogService.LogError("[AutoEPG] Otomatik EPG güncelleme hatası", ex);
-            }
-        }
-
-        private async System.Threading.Tasks.Task RunAutoMetadataEnrichmentAsync()
-        {
-            try
-            {
-                var db = new StreamMesh.Core.Database.DatabaseEngine();
-                string apiKey = db.GetSetting("TmdbApiKey", "");
-                if (string.IsNullOrWhiteSpace(apiKey))
-                {
-                    // TMDB API anahtarı tanımlı değilse arka plan sorgusunu çalıştırma
-                    return;
-                }
-
-                var metaEng = new StreamMesh.Core.Media.MetadataEngine();
-
-                // TMDB Günlük Limit kontrolü (1000 istek/gün)
-                var stats = db.GetDailyQueryStats();
-                if (stats.count >= 950)
-                {
-                    LogService.LogInfo("[AutoMetadata] Günlük TMDB sorgu limitine (1000) yaklaşıldı. Otomatik zenginleştirme duraklatıldı.");
-                    return;
-                }
-
-                var allChannels = await db.GetAllChannelsAsync();
-                var pendingMedia = allChannels.Where(c =>
-                    (c.Category == "Film" || c.Category == "Movie" || c.Category == "Dizi" || c.Category == "Series" || !string.IsNullOrWhiteSpace(c.SeriesBaseName)) &&
-                    string.IsNullOrWhiteSpace(c.Overview)
-                ).Take(50).ToList();
-
-                if (pendingMedia.Count > 0)
-                {
-                    LogService.LogInfo($"[AutoMetadata] {pendingMedia.Count} adet eksik açıklamalı film/dizi zenginleştiriliyor...");
-                    foreach (var item in pendingMedia)
-                    {
-                        try
-                        {
-                            var curStats = db.GetDailyQueryStats();
-                            if (curStats.count >= 950) break;
-
-                            await metaEng.EnrichChannelAsync(item);
-                            await System.Threading.Tasks.Task.Delay(500);
-                        }
-                        catch (Exception innerEx)
-                        {
-                            LogService.LogError($"[AutoMetadata] Kanal metadata hatası: {item.Name}", innerEx);
-                        }
-                    }
-                    LogService.LogInfo("[AutoMetadata] Otomatik metadata taraması tamamlandı.");
-                }
-            }
-            catch (Exception ex)
-            {
-                LogService.LogError("[AutoMetadata] Otomatik metadata tarama hatası", ex);
             }
         }
     }
